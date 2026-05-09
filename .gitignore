@@ -1,0 +1,36 @@
+# Build artifacts
+*.o
+*.so
+*.so.*
+*.bc
+*.a
+*.la
+*.lo
+*.dylib
+
+# Editor / tooling
+*~
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+*.orig
+*.rej
+
+# PG regression / TAP test outputs
+results/
+regression.diffs
+regression.out
+tmp_check/
+tmp_check_iso/
+log/
+output_iso/
+
+# Generated PGXS bits
+libpg_stat_backtrace.a
+libpg_stat_backtrace.pc
+
+# Patches / local notes
+*.patch
+*.bak

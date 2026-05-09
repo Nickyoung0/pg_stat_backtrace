@@ -1,0 +1,8 @@
+# pg_stat_backtrace extension
+comment = 'get/log C-level backtrace of PostgreSQL processes via ptrace+libunwind'
+default_version = '1.0'
+module_pathname = '$libdir/pg_stat_backtrace'
+relocatable = true
+# This extension uses ptrace(2) to attach to other PG processes.
+# It does NOT need to be listed in shared_preload_libraries; LOAD on
+# first call (via CREATE EXTENSION) is sufficient.

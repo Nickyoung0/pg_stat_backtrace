@@ -1,0 +1,97 @@
+--
+-- Regression test for pg_stat_backtrace.
+--
+-- This file is run by pg_regress.  We test only platform-independent
+-- properties:
+--   * extension creates / drops cleanly,
+--   * the two SQL-callable functions exist with the right signatures,
+--   * default privileges (REVOKE EXECUTE FROM PUBLIC) are in place,
+--   * STRICT NULL handling works,
+--   * non-positive PIDs are rejected with WARNING (not ERROR) and
+--     produce NULL / false without touching ptrace,
+--   * self-target is rejected up-front (no ptrace attempt).
+--
+-- We deliberately avoid asserting on actual unwind output -- it
+-- depends on architecture, optimization, debug info and yama
+-- ptrace_scope, and would generate spurious diffs.  We also avoid
+-- emitting any PID in diff'd output, since PIDs change every run.
+--
+CREATE EXTENSION pg_stat_backtrace;
+-- Both expected functions must exist with the right signatures.
+SELECT proname, pronargs, provolatile, proisstrict, proparallel,
+       prorettype::regtype
+FROM   pg_proc
+WHERE  proname IN ('pg_get_backtrace', 'pg_log_backtrace')
+ORDER  BY proname;
+     proname      | pronargs | provolatile | proisstrict | proparallel | prorettype 
+------------------+----------+-------------+-------------+-------------+------------
+ pg_get_backtrace |        1 | v           | t           | r           | text
+ pg_log_backtrace |        1 | v           | t           | r           | boolean
+(2 rows)
+
+-- Default privileges: install script REVOKEs EXECUTE from PUBLIC.
+SELECT proname,
+       has_function_privilege('public', oid, 'EXECUTE') AS public_can_exec
+FROM   pg_proc
+WHERE  proname IN ('pg_get_backtrace', 'pg_log_backtrace')
+ORDER  BY proname;
+     proname      | public_can_exec 
+------------------+-----------------
+ pg_get_backtrace | f
+ pg_log_backtrace | f
+(2 rows)
+
+-- STRICT NULL handling: returns NULL without entering the C body.
+SELECT pg_get_backtrace(NULL::int) IS NULL AS got_null;
+ got_null 
+----------
+ t
+(1 row)
+
+SELECT pg_log_backtrace(NULL::int) IS NULL AS got_null;
+ got_null 
+----------
+ t
+(1 row)
+
+-- Non-positive PID -> WARNING + NULL / false; no ptrace is attempted.
+-- Suppress the WARNING so the expected file stays short; the SELECT
+-- result is what we actually assert on.
+SET client_min_messages = ERROR;
+SELECT pg_get_backtrace(0)  IS NULL AS got_null;
+ got_null 
+----------
+ t
+(1 row)
+
+SELECT pg_log_backtrace(0)  AS got_false;
+ got_false 
+-----------
+ f
+(1 row)
+
+SELECT pg_get_backtrace(-1) IS NULL AS got_null;
+ got_null 
+----------
+ t
+(1 row)
+
+SELECT pg_log_backtrace(-1) AS got_false;
+ got_false 
+-----------
+ f
+(1 row)
+
+RESET client_min_messages;
+-- Self-target is rejected up-front (before any ptrace), regardless
+-- of whether libunwind / ptrace would otherwise work.  We can't
+-- print the ERROR text because it embeds MyProcPid, so use
+-- VERBOSITY sqlstate to assert only the SQLSTATE.
+\set VERBOSITY sqlstate
+SELECT pg_get_backtrace(pg_backend_pid());
+ERROR:  55000
+SELECT pg_log_backtrace(pg_backend_pid());
+ERROR:  55000
+\set VERBOSITY default
+-- Cleanup.
+DROP EXTENSION pg_stat_backtrace;
