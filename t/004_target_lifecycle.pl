@@ -15,6 +15,7 @@
 use strict;
 use warnings FATAL => 'all';
 
+use POSIX qw(_exit);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -42,18 +43,31 @@ $node->start;
 $node->safe_psql('postgres', 'CREATE EXTENSION pg_stat_backtrace');
 
 # -----------------------------------------------------------------------------
-# Helper: spawn a sleeper and return (BackgroundPsql, pid).
+# Helper: spawn a sleeper and return (child_pid, backend_pid).
+# We use a forked psql child rather than BackgroundPsql to remain
+# portable across PG14-19 BackgroundPsql interface differences.
 # -----------------------------------------------------------------------------
 sub spawn_sleeper
 {
 	my ($node, $secs) = @_;
-	my $bg = $node->background_psql('postgres');
-	$bg->query_until(qr/./, "SELECT 'ready'");
-	$bg->{stdin} .= "SELECT pg_sleep($secs);\n";
-	$bg->{timeout}->start if $bg->{timeout};
+	my $connstr = $node->connstr('postgres');
+	my $cpid = fork();
+	defined $cpid or die "fork() failed: $!";
+	if ($cpid == 0)
+	{
+		# Detach from the parent's process group so IPC::Run's
+		# internal cleanup paths (used by safe_psql/run/etc) cannot
+		# accidentally signal us.
+		POSIX::setsid();
+		exec('psql',
+			'--no-psqlrc', '--no-align', '--tuples-only', '--quiet',
+			'--dbname' => $connstr,
+			'-c' => "SELECT pg_sleep($secs)")
+		  or POSIX::_exit(127);
+	}
 
 	my $pid;
-	for (my $i = 0; $i < 50; $i++)
+	for (my $i = 0; $i < 100; $i++)
 	{
 		$pid = $node->safe_psql('postgres',
 			"SELECT pid FROM pg_stat_activity "
@@ -63,7 +77,14 @@ sub spawn_sleeper
 		select undef, undef, undef, 0.1;
 	}
 	die "sleeper never appeared" unless $pid =~ /^\d+$/;
-	return ($bg, $pid);
+	return ($cpid, $pid);
+}
+
+sub kill_sleeper
+{
+	my ($cpid) = @_;
+	kill 'TERM', $cpid;
+	waitpid($cpid, 0);
 }
 
 sub target_state
@@ -84,44 +105,34 @@ sub target_state
 
 # -----------------------------------------------------------------------------
 # 1. Target exits before pg_get_backtrace sees it.
-#    We pass a PID of a just-exited process.  The race window is
-#    narrow, but we can simulate it by using a PID that definitely
-#    no longer exists.
+#    Use a PID that is very unlikely to exist on the host: 0x7fffffff
+#    (max 32-bit signed int) is well above kernel.pid_max default
+#    (4M = 0x400000), so /proc/<pid>/status will not exist.
+#    This exercises the "PID is not a PG server process" code path,
+#    which is the same outcome we'd get for an exited PID.
 # -----------------------------------------------------------------------------
 {
-	# Pick a PID that is very unlikely to be anything.
-	# Use a PID that was ours then exited.
-	my $doomed_pid;
-	if (my $pid = fork())
-	{
-		# parent
-		waitpid($pid, 0);
-		$doomed_pid = $pid;
-	}
-	else
-	{
-		# child exits immediately
-		exit 0;
-	}
+	my $doomed_pid = 2147483647;    # INT_MAX
 
 	my $r = $node->safe_psql('postgres',
 		"SET client_min_messages = ERROR; "
 		. "SELECT pg_get_backtrace($doomed_pid) IS NULL");
 	is($r, 't',
-		"exited PID $doomed_pid: returns NULL (not PG process)");
+		"non-existent PID $doomed_pid: returns NULL (not PG process)");
 }
 
 # -----------------------------------------------------------------------------
-# 2. Target is killed between resolve and our capture loop.
-#    We race: start a capture that sleeps (via pg_sleep injection in
-#    shell would be complex); instead we do the simpler test that a
-#    just-killed target returns the "not a PG server process" WARNING.
+# 2. Target is killed via pg_terminate_backend before our capture.
+#    Note: we cannot use kill(9) on a backend because the Cluster.pm
+#    test framework sets restart_after_crash=off, which would shut
+#    down the whole cluster on any backend SIGKILL.  Using
+#    pg_terminate_backend() (SIGTERM) lets PG exit cleanly.
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 60);
+	my ($child, $pid) = spawn_sleeper($node, 60);
 
-	# Kill target with SIGKILL; wait for pg_stat_activity to notice.
-	kill 9, $pid;
+	# Terminate target via pg_terminate_backend; wait for it to vanish.
+	$node->safe_psql('postgres', "SELECT pg_terminate_backend($pid)");
 	for (my $i = 0; $i < 50; $i++)
 	{
 		my $c = $node->safe_psql('postgres',
@@ -133,52 +144,37 @@ sub target_state
 	my $r = $node->safe_psql('postgres',
 		"SET client_min_messages = ERROR; "
 		. "SELECT pg_get_backtrace($pid) IS NULL");
-	is($r, 't', "killed PID returns NULL (no longer in ProcArray)");
+	is($r, 't', "terminated PID returns NULL (no longer in ProcArray)");
 
-	$bg->quit;
+	# child psql may already have died because target backend was
+	# killed; reap it best-effort.
+	waitpid($child, 0);
 }
 
 # -----------------------------------------------------------------------------
-# 3. pg_cancel_backend on our own capture session:
-#    The calling session should return promptly, target should resume.
+# 3. Synchronous capture against a long-running target: completes
+#    quickly and target is left in a runnable state, not T-state.
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 60);
+	my ($child, $pid) = spawn_sleeper($node, 60);
 
-	# Start a capture session in the background.
-	my $capper = $node->background_psql('postgres');
-	$capper->query_until(qr/./, "SELECT 'ready'");
-
-	# Make the capture statement.  The capture itself is fast (<10ms),
-	# so we wrap it in a loop to create a window worth cancelling.
-	# Actually, cancelling a 10ms operation is racy; instead we just
-	# verify the capture completes correctly when issued.
-	$capper->{stdin} .= "SELECT length(pg_get_backtrace($pid)) > 0;\n";
-	$capper->{timeout}->start if $capper->{timeout};
-
-	# Wait for completion.
-	my $ok = 0;
-	for (my $i = 0; $i < 50; $i++)
-	{
-		if ($capper->{stdout} =~ /\bt\b/) { $ok = 1; last; }
-		select undef, undef, undef, 0.1;
-	}
-	ok($ok, 'capture completes in reasonable time');
+	my $len = $node->safe_psql('postgres',
+		"SELECT length(pg_get_backtrace($pid))");
+	cmp_ok($len, '>', 0, 'capture completes synchronously and returns text');
 
 	# Target must still be S (sleeping), not T (stopped)
 	my $state = target_state($pid);
 	like($state, qr/[SRD]/,
 		"target still runnable after capture (state=$state)");
 
-	$capper->quit;
-	$bg->quit;
+	kill_sleeper($child);
 }
 
 # -----------------------------------------------------------------------------
 # 4. Repeated captures on the same target: no tracer-attach leak.
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 60);
+	my ($child, $pid) = spawn_sleeper($node, 60);
 
 	for my $i (1 .. 20)
 	{
@@ -202,7 +198,7 @@ sub target_state
 		is($tracer, '0', 'no tracer attached after all captures');
 	}
 
-	$bg->quit;
+	kill_sleeper($child);
 }
 
 $node->stop;

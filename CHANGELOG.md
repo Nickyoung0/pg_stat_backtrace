@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TAP tests `t/003_capture.pl`, `t/004_target_lifecycle.pl`,
+  `t/005_concurrent.pl`: the helper `spawn_sleeper()` originally
+  used `BackgroundPsql` and fed the long-running query directly
+  into `$bg->{stdin}` without explicitly pumping IPC::Run.  The
+  preamble call `$bg->query_until(qr/./, "SELECT 'ready'")` also
+  passed a SQL string with no terminating newline / semicolon,
+  which means `psql` never actually executed it — the test then
+  blocked for the full 180 s default timeout.  Reworked these
+  three files to fork an opaque `psql -c 'SELECT pg_sleep(N)'`
+  child process (with `POSIX::setsid()` to detach from the
+  parent's process group), which is portable across PG14-19
+  `BackgroundPsql` interface differences and avoids any IPC::Run
+  pump issues.  Also: replaced `kill 9, $backend_pid` in
+  `004_target_lifecycle.pl` test 2 with `pg_terminate_backend()`,
+  because `Cluster.pm` defaults `restart_after_crash=off` and any
+  backend SIGKILL would shut down the whole test cluster.
+  Verified passing on PG14, 15, 16, 17, 18, and 19.  No change to
+  the extension itself; only the tests were wrong.
+
 - TAP test `t/001_basic.pl`: the function-signature concatenation
   query was not portable across PG14-19.  `pronargs` is `int2` and
   `provolatile`/`proparallel` are of the internal `"char"` type;

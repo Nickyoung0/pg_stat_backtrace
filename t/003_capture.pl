@@ -14,6 +14,7 @@
 use strict;
 use warnings FATAL => 'all';
 
+use POSIX qw(_exit);
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
@@ -51,37 +52,59 @@ sub spawn_sleeper
 {
 	my ($node, $secs) = @_;
 
-	# Use BackgroundPsql so the session stays alive and we can kill it
-	# deterministically at the end.
-	my $bg = $node->background_psql('postgres');
-	$bg->query_until(qr/./, "SELECT 'ready'");
-
-	# Issue the sleep asynchronously; do NOT wait for its result.
-	$bg->{stdin} .= "SELECT pg_sleep($secs);\n";
-	$bg->{timeout}->start if $bg->{timeout};
-
-	# Wait until pg_stat_activity reflects the sleeping query.
-	my $pid;
-	for (my $i = 0; $i < 50; $i++)
+	# Fork a child that simply runs psql with "SELECT pg_sleep(N)".
+	# We do NOT use BackgroundPsql here because feeding stdin and
+	# pumping reliably across PG14-19 is fragile; an opaque child
+	# psql process is more portable.  The child connects to the
+	# cluster's socket directly.
+	my $connstr = $node->connstr('postgres');
+	my $pid = fork();
+	defined $pid or die "fork() failed: $!";
+	if ($pid == 0)
 	{
-		$pid = $node->safe_psql('postgres',
+		# child
+		# Detach from parent's process group so any IPC::Run cleanup
+		# in the parent does not accidentally signal us.
+		POSIX::setsid();
+		# exec replaces the process image; if it fails, fall through
+		# and bypass Test::Builder/cluster destructors via _exit().
+		exec('psql',
+			'--no-psqlrc', '--no-align', '--tuples-only', '--quiet',
+			'--dbname' => $connstr,
+			'-c' => "SELECT pg_sleep($secs)")
+		  or POSIX::_exit(127);
+	}
+
+	# parent: wait until pg_stat_activity shows the sleeper.
+	my $sleeper_pid;
+	for (my $i = 0; $i < 100; $i++)
+	{
+		$sleeper_pid = $node->safe_psql('postgres',
 			"SELECT pid FROM pg_stat_activity "
 			. "WHERE query LIKE 'SELECT pg_sleep%' "
 			. "AND   pid <> pg_backend_pid() LIMIT 1");
-		last if $pid =~ /^\d+$/;
+		last if $sleeper_pid =~ /^\d+$/;
 		select undef, undef, undef, 0.1;
 	}
 	die "sleeper never appeared in pg_stat_activity"
-	  unless $pid =~ /^\d+$/;
+	  unless $sleeper_pid =~ /^\d+$/;
 
-	return ($bg, $pid);
+	return ($pid, $sleeper_pid);
+}
+
+# Helper to terminate the child psql we forked above.
+sub kill_sleeper
+{
+	my ($child_pid) = @_;
+	kill 'TERM', $child_pid;
+	waitpid($child_pid, 0);
 }
 
 # -----------------------------------------------------------------------------
 # 1. Capture an idle backend.  We sleep long enough to cover capture.
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 30);
+	my ($child, $pid) = spawn_sleeper($node, 30);
 
 	# Do the capture from the main superuser session.
 	my $trace = $node->safe_psql('postgres',
@@ -114,14 +137,14 @@ sub spawn_sleeper
 			"target not in T-state (got: $state_line)");
 	}
 
-	$bg->quit;
+	kill_sleeper($child);
 }
 
 # -----------------------------------------------------------------------------
 # 2. pg_log_backtrace writes to server log and returns true
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 30);
+	my ($child, $pid) = spawn_sleeper($node, 30);
 
 	my $log = $node->logfile();
 	my $offset = -s $log;
@@ -139,7 +162,7 @@ sub spawn_sleeper
 	like($log_contents, qr/#\d+\s+0x[0-9a-f]+\s+in\s+\S+/,
 		'server log contains at least one frame');
 
-	$bg->quit;
+	kill_sleeper($child);
 }
 
 # -----------------------------------------------------------------------------
@@ -168,7 +191,7 @@ sub spawn_sleeper
 # 4. Frame cap: captured output size is bounded
 # -----------------------------------------------------------------------------
 {
-	my ($bg, $pid) = spawn_sleeper($node, 30);
+	my ($child, $pid) = spawn_sleeper($node, 30);
 
 	my $trace = $node->safe_psql('postgres',
 		"SELECT pg_get_backtrace($pid)");
@@ -178,7 +201,7 @@ sub spawn_sleeper
 	cmp_ok(length($trace), '<', 32 * 1024,
 		'captured text is bounded (< 32 KB)');
 
-	$bg->quit;
+	kill_sleeper($child);
 }
 
 $node->stop;
