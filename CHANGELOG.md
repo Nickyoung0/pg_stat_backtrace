@@ -6,6 +6,20 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- TAP test `t/001_basic.pl`: the function-signature concatenation
+  query was not portable across PG14-19.  `pronargs` is `int2` and
+  `provolatile`/`proparallel` are of the internal `"char"` type;
+  on PG18+ the parser refuses `text || "char"` with
+  `ERROR: operator is not unique`, while `proisstrict::text`
+  produces `'true'/'false'` (not the documented `'t'/'f'`).
+  Added explicit `::text` casts and a `CASE` expression for the
+  bool column.  Verified passing on PG14, 15, 16, 17, 18, and 19.
+  No change to the extension itself; only the test was wrong.
+
 ## [1.0.0] - 2026-05-09
 
 Initial public release.
