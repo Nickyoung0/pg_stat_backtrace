@@ -1,8 +1,9 @@
 # pg_stat_backtrace — Design Notes
 
 **Version**: 1.0
-**Status**: Implementation complete; documentation and packaging follow
-PostgreSQL contrib conventions.
+**Status**: Implementation, packaging, and CI complete.  SGML
+documentation and `contrib/` registration are deferred until after
+the upstream RFC; see § 14.1.
 
 This document records *why* the extension is built the way it is.  It is
 intended as a companion to `README.md` (the user-facing documentation)
@@ -189,7 +190,7 @@ SQL caller
 
 | File | Role |
 |------|------|
-| `pg_stat_backtrace.c` | The complete C implementation (~1030 lines). |
+| `pg_stat_backtrace.c` | The complete C implementation (~1090 lines). |
 | `pg_stat_backtrace--1.0.sql` | SQL function definitions and `REVOKE EXECUTE FROM PUBLIC`. |
 | `pg_stat_backtrace.control` | Extension metadata. |
 | `Makefile` | PGXS build with libunwind preflight checks (PIC link probe). |
@@ -798,12 +799,12 @@ locked-down CI environments do not produce false positives.
 
 | File | Coverage | Needs `ptrace` | Assertions |
 |------|----------|----------------|------------|
-| `t/001_basic.pl` | function signature, default privileges, STRICT, bad PID, self-target, DROP/CREATE loop | ❌ | 10 |
-| `t/002_permission.pl` | non-super without grant is rejected, non-super cannot target super, role-membership path | ❌ | 7 |
-| `t/003_capture.pl` | real backend capture, aux-proc capture, `pg_log_backtrace` writes to log, output size bound | ✅ | 11 |
-| `t/004_target_lifecycle.pl` | target exits before capture, target killed mid-capture, 20-iteration loop with no residual state, `T`-state detection | ✅ | 7 |
-| `t/005_concurrent.pl` | two sessions on the same PID (`EPERM 42501` or `55000` state race), multiple sessions on distinct PIDs | ✅ | 3 |
-| **Total** | | | **38** |
+| `t/001_basic.pl` | function signature, default privileges, STRICT, bad PID, self-target, DROP/CREATE loop | ❌ | 11 |
+| `t/002_permission.pl` | non-super without grant is rejected, non-super cannot target super, role-membership path | ❌ | 8 |
+| `t/003_capture.pl` | real backend capture, aux-proc capture, `pg_log_backtrace` writes to log, output size bound | ✅ | 12 |
+| `t/004_target_lifecycle.pl` | target exits before capture, target killed mid-capture, 20-iteration loop with no residual state, `T`-state detection | ✅ | 8 |
+| `t/005_concurrent.pl` | two sessions on the same PID (`EPERM 42501` or `55000` state race), multiple sessions on distinct PIDs | ✅ | 4 |
+| **Total** | | | **43** |
 
 Representative assertion patterns:
 
@@ -882,10 +883,16 @@ meson test -C build pg_stat_backtrace/001_basic
 
 | Item | Effort | Status |
 |------|--------|--------|
+| `LICENSE`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `META.json` | done | ✅ |
+| GitHub Actions CI matrix (PG14–17 build + `installcheck`, plus `-fanalyzer` job) | done | ✅ |
+| `pg_regress` regression test (platform-agnostic) | done | ✅ |
+| TAP test suite under `t/` (5 scripts, 43 assertions) | done | ✅ |
+| `v1.0.0` annotated git tag and signed source tarballs | done | ✅ |
 | SGML documentation (`doc/src/sgml/pgstatbacktrace.sgml`) | ~3 h | ⏳ |
 | Register in `contrib/Makefile` and `contrib/meson.build` | ~10 min | ⏳ |
 | Fold `README.md` content into the SGML chapter | ~30 min | ⏳ |
 | Naming review (`pg_stat_*` namespace convention) | community feedback | ⏳ |
+| RFC email to `pgsql-hackers` | ~1 h | ⏳ |
 
 ### 14.2 Feature enhancement candidates
 
