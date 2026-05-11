@@ -19,8 +19,10 @@ When filing a bug, please include:
 ## Building from source
 
 ```bash
-# system dependencies (RHEL / CentOS / TencentOS)
+# system dependencies (RHEL / CentOS / Rocky / Alma)
 sudo dnf install -y postgresqlNN-devel libunwind-devel
+# Debian / Ubuntu:  sudo apt-get install -y postgresql-server-dev-NN libunwind-dev
+# Alpine:           sudo apk add postgresqlNN-dev libunwind-dev
 # or build PIC libunwind from source: see README.md
 
 cd pg_stat_backtrace
