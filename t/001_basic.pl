@@ -33,8 +33,12 @@ $node->safe_psql('postgres', 'CREATE EXTENSION pg_stat_backtrace');
 # 1. Function signatures
 # -----------------------------------------------------------------------------
 my $sig = $node->safe_psql('postgres', <<SQL);
-SELECT proname || ',' || pronargs || ',' || provolatile || ',' ||
-       proisstrict || ',' || proparallel || ',' || prorettype::regtype
+SELECT proname
+       || ',' || pronargs::text
+       || ',' || provolatile::text
+       || ',' || (CASE WHEN proisstrict THEN 't' ELSE 'f' END)
+       || ',' || proparallel::text
+       || ',' || prorettype::regtype::text
 FROM   pg_proc
 WHERE  proname IN ('pg_get_backtrace', 'pg_log_backtrace')
 ORDER  BY proname;
