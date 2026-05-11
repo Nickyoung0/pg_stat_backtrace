@@ -1,0 +1,50 @@
+{
+    "name": "pg_stat_backtrace",
+    "abstract": "Capture C-level stack backtraces of any PostgreSQL process from SQL.",
+    "description": "pg_stat_backtrace exposes pg_get_backtrace(pid) and pg_log_backtrace(pid) functions that capture the C-level stack of any PostgreSQL backend or auxiliary process on the same host using ptrace(PTRACE_SEIZE) + libunwind. Unlike pg_log_backend_memory_contexts(), the target is not required to be cooperative or responsive to signals, which makes the module particularly useful for debugging hung or stuck processes.",
+    "version": "1.0.0",
+    "maintainer": [
+        "The pg_stat_backtrace contributors"
+    ],
+    "license": "postgresql",
+    "provides": {
+        "pg_stat_backtrace": {
+            "abstract": "Capture C-level stack backtraces of any PostgreSQL process from SQL.",
+            "file": "pg_stat_backtrace--1.0.sql",
+            "docfile": "README.md",
+            "version": "1.0.0"
+        }
+    },
+    "prereqs": {
+        "runtime": {
+            "requires": {
+                "PostgreSQL": "14.0.0"
+            }
+        }
+    },
+    "resources": {
+        "bugtracker": {
+            "web": "https://github.com/REPLACE_ME/pg_stat_backtrace/issues"
+        },
+        "repository": {
+            "url": "git://github.com/REPLACE_ME/pg_stat_backtrace.git",
+            "web": "https://github.com/REPLACE_ME/pg_stat_backtrace",
+            "type": "git"
+        }
+    },
+    "generated_by": "pg_stat_backtrace contributors",
+    "meta-spec": {
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
+    },
+    "tags": [
+        "backtrace",
+        "stacktrace",
+        "ptrace",
+        "libunwind",
+        "debug",
+        "diagnostics",
+        "monitoring",
+        "observability"
+    ]
+}

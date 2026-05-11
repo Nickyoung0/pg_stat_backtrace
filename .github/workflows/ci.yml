@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    name: PG${{ matrix.pg }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        pg: [14, 15, 16, 17]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libunwind-dev \
+            pkg-config \
+            curl ca-certificates gnupg lsb-release
+
+      - name: Add PostgreSQL APT repository
+        run: |
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+
+      - name: Install PostgreSQL ${{ matrix.pg }}
+        run: |
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }}
+
+      - name: Build (strict warnings)
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          make PG_CFLAGS="-Wall -Wextra -Wshadow -Wpointer-arith -Wcast-align -Werror"
+
+      - name: Install
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          sudo --preserve-env=PG_CONFIG make install
+
+      - name: Allow non-root ptrace (CI only)
+        run: |
+          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope || true
+
+      - name: Start PostgreSQL ${{ matrix.pg }}
+        run: |
+          sudo systemctl start postgresql@${{ matrix.pg }}-main
+          sudo -u postgres psql -c "SELECT version();"
+
+      - name: Run regression tests
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          sudo -u postgres make installcheck \
+            PGPORT=5432 PGHOST=/var/run/postgresql PGUSER=postgres
+
+      - name: Show regression diffs on failure
+        if: failure()
+        run: |
+          if [ -f regression.diffs ]; then
+            cat regression.diffs
+          fi
+
+  static-analysis:
+    name: GCC -fanalyzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libunwind-dev pkg-config \
+            postgresql-16 postgresql-server-dev-16 gcc-13
+      - name: Build with -fanalyzer
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
+          make CC=gcc-13 PG_CFLAGS="-Wall -Wextra -fanalyzer -Wnull-dereference -Wformat-security"
