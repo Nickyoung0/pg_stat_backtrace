@@ -34,10 +34,8 @@ TAP_TESTS = 1
 #   Debian/Ubuntu:          apt install libunwind-dev
 #   Alpine:                 apk add libunwind-dev
 #
-# The package MUST provide the dynamic libraries:
-#   libunwind.so, libunwind-ptrace.so, libunwind-<arch>.so
-# A non-PIC libunwind-ptrace.a (as shipped by some RHEL-family distros)
-# cannot be linked into a -shared module and is rejected.
+# The libunwind development package must support linking the required
+# ptrace functions into a shared module.
 #
 # Runtime requirements (target host):
 #   - Linux only.  ptrace semantics are Linux-specific, and we read
@@ -77,87 +75,19 @@ $(error pg_stat_backtrace requires libunwind + libunwind-ptrace, \
 endif
 
 # ----------------------------------------------------------------------
-# Detect the .so / .a situation explicitly so we produce a helpful error
-# message on RHEL/CentOS where only the non-PIC .a is installed.
-#
-# We do TWO checks, in order:
-#   1. Look for a *real* libunwind-ptrace.so in the usual library dirs.
-#      A pkg-config --libs hit that resolves only to libunwind-ptrace.a
-#      will later fail with the classic "R_X86_64_PC32 ... recompile with
-#      -fPIC" link error from ld, which is exactly what we want to
-#      pre-empt with a better message.
-#   2. Try an actual PIC link of a trivial object against the pkg-config
-#      flags.  This catches exotic layouts where the .so lives in an
-#      unusual place but ld/ldconfig can find it anyway.
-# ----------------------------------------------------------------------
-
-PSBT_UNWIND_LIBDIR := $(shell $(PKG_CONFIG) --variable=libdir libunwind-ptrace 2>/dev/null)
-
-# Resolve -L prefix hints from pkg-config --libs-only-L too; some distros
-# point the dev package at an unusual directory.
-PSBT_UNWIND_LIBDIRS := $(PSBT_UNWIND_LIBDIR) \
-	$(patsubst -L%,%,$(filter -L%,$(PSBT_UNWIND_LIBS))) \
-	/usr/lib64 /usr/lib \
-	/usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu \
-	/usr/local/lib64 /usr/local/lib
-
-# Split the probe: we need BOTH
-#   * a "linker symlink" (plain libunwind-ptrace.so without version suffix)
-#     -- this is what "ld -lunwind-ptrace" actually resolves, and it is
-#     only shipped by the -devel / -dev package; if it is missing, ld
-#     silently falls back to the non-PIC .a in the same directory and
-#     we get the R_X86_64_PC32 error later in the build.
-#   * at least one versioned runtime .so.N* -- sanity check that the
-#     shared library itself is actually installed.
-#
-# Both lists are computed so we can emit distinct diagnostics.
-PSBT_UNWIND_PTRACE_SO_LINK := $(strip $(foreach d,$(PSBT_UNWIND_LIBDIRS),\
-	$(wildcard $(d)/libunwind-ptrace.so)))
-PSBT_UNWIND_PTRACE_SO_VERS := $(strip $(foreach d,$(PSBT_UNWIND_LIBDIRS),\
-	$(wildcard $(d)/libunwind-ptrace.so.*)))
-
-ifeq ($(PSBT_UNWIND_PTRACE_SO_LINK)$(PSBT_UNWIND_PTRACE_SO_VERS),)
-$(error pg_stat_backtrace: no SHARED libunwind-ptrace.so was found in \
-	any of $(PSBT_UNWIND_LIBDIRS).  Only the non-PIC static archive \
-	libunwind-ptrace.a (if any) is present, which cannot be linked into \
-	a PIC shared module.  Fixes: (1) install a libunwind-devel package \
-	that ships .so files (EPEL on RHEL/CentOS), or (2) build libunwind \
-	from source with "./configure --enable-shared --with-pic \
-	--enable-ptrace" and re-run "make".)
-endif
-
-ifeq ($(PSBT_UNWIND_PTRACE_SO_LINK),)
-$(error pg_stat_backtrace: versioned libunwind-ptrace.so.N was found \
-	($(PSBT_UNWIND_PTRACE_SO_VERS)), but the unversioned linker symlink \
-	'libunwind-ptrace.so' is missing.  This happens when only the \
-	runtime libunwind package is installed, not the development \
-	package.  In that situation "ld -lunwind-ptrace" silently falls \
-	back to the non-PIC libunwind-ptrace.a and fails with \
-	R_X86_64_PC32 relocation errors.  Fix: install the matching \
-	-devel / -dev package, for example: \
-	"dnf install libunwind-devel" (RHEL/Fedora), \
-	"apt install libunwind-dev" (Debian/Ubuntu), or rebuild libunwind \
-	from source with --enable-shared --with-pic --enable-ptrace.)
-endif
-
-# Belt-and-braces: try an actual PIC shared link.  If this fails, emit a
-# synthesised "you hit the non-PIC .a" error BEFORE the real build starts,
-# instead of letting ld surface the cryptic R_X86_64_PC32 message much
-# later in the build.
+# Check the same symbols and linker flags used by the extension. Some
+# distributions provide libunwind-ptrace as a linkable static archive.
 PSBT_UNWIND_LINKTEST := $(shell \
-	printf 'int main(void){return 0;}\n' > /tmp/psbt_linktest.c 2>/dev/null && \
-	$(CC) -shared -fPIC /tmp/psbt_linktest.c -o /tmp/psbt_linktest.so \
-		$(PSBT_UNWIND_LIBS) 2>&1; \
-	rc=$$?; rm -f /tmp/psbt_linktest.c /tmp/psbt_linktest.so; \
-	if [ $$rc -ne 0 ]; then echo FAIL; fi)
+	tmp=$$(mktemp -d) || exit 1; \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PSBT_UNWIND_CFLAGS) -fPIC -shared \
+		$(LDFLAGS) $(PG_LDFLAGS) -Wl,-z,defs \
+		$(dir $(lastword $(MAKEFILE_LIST)))config/check_unwind.c \
+		-o "$$tmp/probe.so" $(PSBT_UNWIND_LIBS) $(PSBT_UNWIND_RPATH) \
+		>/dev/null && echo yes)
 
-ifneq (,$(findstring FAIL,$(PSBT_UNWIND_LINKTEST)))
-$(error pg_stat_backtrace: a trial PIC link against libunwind-ptrace \
-	failed.  This almost always means the installed libunwind-ptrace.a \
-	was built without -fPIC and cannot be linked into a PostgreSQL \
-	shared module.  Fix: install a libunwind package that provides \
-	libunwind-ptrace.so (EPEL on RHEL/CentOS), or rebuild libunwind \
-	from source with "--enable-shared --with-pic --enable-ptrace".)
+ifneq ($(PSBT_UNWIND_LINKTEST),yes)
+$(error pg_stat_backtrace: cannot link the required libunwind-ptrace symbols into a shared module with the selected compiler and flags)
 endif
 
 PG_CPPFLAGS += $(PSBT_UNWIND_CFLAGS)
